@@ -70,27 +70,25 @@ def spectral_loss_stft(y_hat: torch.Tensor, y: torch.Tensor, mask_future: Option
 
 
 def wgan_gp(discriminator, past: torch.Tensor, real_future: torch.Tensor, fake_future: torch.Tensor, mask_future: torch.Tensor, lambda_gp: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Compute D(real), D(fake), and gradient penalty over future only
-    with torch.cuda.amp.autocast(enabled=False):
-        # forward passes in FP32 for stability of GP
-        logits_real, _ = discriminator(past.float(), real_future.float(), return_feats=False)
-        logits_fake, _ = discriminator(past.float(), fake_future.float(), return_feats=False)
-        H = real_future.shape[1]
-        # average masked future logits to scalar per sample
-        mr = (logits_real[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
-        mf = (logits_fake[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
+    # Compute D(real), D(fake), and gradient penalty over future only in FP32 for stability.
+    logits_real, _ = discriminator(past.float(), real_future.float(), return_feats=False)
+    logits_fake, _ = discriminator(past.float(), fake_future.float(), return_feats=False)
+    H = real_future.shape[1]
+    # average masked future logits to scalar per sample
+    mr = (logits_real[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
+    mf = (logits_fake[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
 
-        # gradient penalty: interpolate only the future, keep past fixed
-        eps = torch.rand(real_future.size(0), 1, 1, device=real_future.device)
-        inter_future = eps * real_future.float() + (1.0 - eps) * fake_future.float()
-        inter_future.requires_grad_(True)
-        inter_logits, _ = discriminator(past.float(), inter_future, return_feats=False)
-        inter_scores = (inter_logits[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
-        grads = torch.autograd.grad(
-            outputs=inter_scores.sum(), inputs=inter_future,
-            create_graph=True, retain_graph=True, only_inputs=True
-        )[0]
-        grads = grads.reshape(grads.size(0), -1)
-        grad_norm = grads.norm(2, dim=1)
-        gp = lambda_gp * ((grad_norm - 1.0) ** 2).mean()
+    # gradient penalty: interpolate only the future, keep past fixed
+    eps = torch.rand(real_future.size(0), 1, 1, device=real_future.device)
+    inter_future = eps * real_future.float() + (1.0 - eps) * fake_future.float()
+    inter_future.requires_grad_(True)
+    inter_logits, _ = discriminator(past.float(), inter_future, return_feats=False)
+    inter_scores = (inter_logits[:, -H:, 0] * mask_future.float()).sum(dim=1) / (mask_future.sum(dim=1) + 1e-8)
+    grads = torch.autograd.grad(
+        outputs=inter_scores.sum(), inputs=inter_future,
+        create_graph=True, retain_graph=True, only_inputs=True
+    )[0]
+    grads = grads.reshape(grads.size(0), -1)
+    grad_norm = grads.norm(2, dim=1)
+    gp = lambda_gp * ((grad_norm - 1.0) ** 2).mean()
     return mr.detach(), mf.detach(), gp

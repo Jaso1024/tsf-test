@@ -169,10 +169,9 @@ def main():
                 # === D steps ===
                 for _ in range(args.n_critic):
                     z = torch.randn(B, args.d_z, device=device)
-                    attn_mask = causal_attn_mask(T_in + H_max, device)
                     with torch.no_grad():
                         with amp.autocast():
-                            out = G(past, fut_shift, z, attn_mask)[:, T_in:, :]
+                            out = G(past, fut_shift, z, attn_mask=None)[:, T_in:, :]
                             if use_quantiles:
                                 Q = len(args.quantiles)
                                 out_q = out.view(B, H_max, K, Q)
@@ -199,9 +198,8 @@ def main():
 
                 # === G step ===
                 z = torch.randn(B, args.d_z, device=device)
-                attn_mask = causal_attn_mask(T_in + H_max, device)
                 with amp.autocast():
-                    out = G(past, fut_shift, z, attn_mask)[:, T_in:, :]
+                    out = G(past, fut_shift, z, attn_mask=None)[:, T_in:, :]
                     if use_quantiles:
                         Q = len(args.quantiles)
                         out_q = out.view(B, H_max, K, Q)
@@ -273,9 +271,8 @@ def main():
                             vmask = make_future_mask(Bv, Hv, vN, device)
                             vstart = vpast[:, -1:, :]
                             vfshift = torch.cat([vstart, vfut[:, :-1, :]], dim=1)
-                            attn_mask_v = causal_attn_mask(vpast.size(1) + vfut.size(1), device)
                             zout = torch.randn(Bv, args.d_z, device=device)
-                            vout = G(vpast, vfshift, zout, attn_mask_v)[:, vpast.size(1):, :]
+                            vout = G(vpast, vfshift, zout, attn_mask=None)[:, vpast.size(1):, :]
                             if use_quantiles:
                                 Q = len(args.quantiles)
                                 vout_q = vout.view(Bv, Hv, args.K, Q)

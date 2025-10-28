@@ -25,8 +25,9 @@ class FlashSDPA:
         if not self.enable:
             return None
         try:
+            # Allow math fallback to avoid kernel/backward unsupported errors.
             self.ctx = torch.backends.cuda.sdp_kernel(
-                enable_flash=True, enable_math=False, enable_mem_efficient=True
+                enable_flash=True, enable_math=True, enable_mem_efficient=True
             )
             self.ctx.__enter__()
         except Exception:
@@ -62,17 +63,15 @@ class AmpConfig:
     mode: str = "bf16"  # 'bf16' | 'fp16' | 'off'
 
     def autocast(self):
-        if self.mode == "bf16":
-            return torch.cuda.amp.autocast(dtype=torch.bfloat16)
-        if self.mode == "fp16":
-            return torch.cuda.amp.autocast(dtype=torch.float16)
-        return torch.cuda.amp.autocast(enabled=False)
+        from contextlib import nullcontext
+        if self.mode == "off":
+            return nullcontext()
+        # Use the new API; works only on CUDA
+        dtype = torch.bfloat16 if self.mode == "bf16" else torch.float16
+        return torch.amp.autocast(device_type="cuda", dtype=dtype)
 
     def scaler(self) -> Optional[torch.cuda.amp.GradScaler]:
-        if self.mode == "off":
-            return None
-        # BF16 typically does not need GradScaler, but we include a no-op scaler for uniformity
-        # Use scaler only for FP16
+        # Use GradScaler only for FP16; BF16 usually does not need it
         if self.mode == "fp16":
             return torch.cuda.amp.GradScaler()
         return None
@@ -89,4 +88,3 @@ def save_checkpoint(path: str, **state):
 
 def load_checkpoint(path: str):
     return torch.load(path, map_location="cpu")
-

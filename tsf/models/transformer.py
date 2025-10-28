@@ -44,9 +44,9 @@ class CausalSelfAttention(nn.Module):
         # scaled dot-product attention with PyTorch SDPA (Flash if available)
         x = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,  # should be bool with True=mask for SDPA, pass None otherwise
+            attn_mask=None if self.causal else attn_mask,
             dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=self.causal if attn_mask is None else False,
+            is_causal=self.causal,
         )  # (B,h,T,dh)
         x = x.transpose(1, 2).contiguous().view(B, T, C)
         x = self.proj(x)
@@ -227,4 +227,3 @@ class Discriminator(nn.Module):
                 feats.append(x)
         logits = self.head(x)  # (B, T, 1)
         return logits, feats
-
