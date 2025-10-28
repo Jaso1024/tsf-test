@@ -23,13 +23,14 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, causal: bool = True):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, causal: bool = True, backend: str = "sdpa"):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.causal = causal
+        self.backend = backend  # 'sdpa' or 'math'
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
@@ -41,13 +42,26 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)  # (B,h,T,dh)
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        # scaled dot-product attention with PyTorch SDPA (Flash if available)
-        x = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None if self.causal else attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=self.causal,
-        )  # (B,h,T,dh)
+        if self.backend == "sdpa":
+            # scaled dot-product attention with PyTorch SDPA (Flash if available)
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None if self.causal else attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=self.causal,
+            )  # (B,h,T,dh)
+        else:
+            # math (eager) attention, stable across backends
+            scale = 1.0 / math.sqrt(self.d_head)
+            scores = torch.einsum('bhtd,bhTd->bhtT', q, k) * scale  # (B,h,T,T)
+            if self.causal:
+                causal_mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
+                scores = scores.masked_fill(causal_mask, float('-inf'))
+            if attn_mask is not None and not self.causal:
+                scores = scores.masked_fill(attn_mask, float('-inf'))
+            attn = torch.softmax(scores, dim=-1)
+            attn = self.dropout(attn)
+            x = torch.einsum('bhtT,bhTd->bhtd', attn, v)
         x = x.transpose(1, 2).contiguous().view(B, T, C)
         x = self.proj(x)
         return x
@@ -78,10 +92,10 @@ class FiLM(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, d_z: Optional[int], causal: bool, spectral_norm: bool = False):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, d_z: Optional[int], causal: bool, spectral_norm: bool = False, attn_backend: str = "sdpa"):
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = CausalSelfAttention(d_model, n_heads, dropout=dropout, causal=causal)
+        self.attn = CausalSelfAttention(d_model, n_heads, dropout=dropout, causal=causal, backend=attn_backend)
         self.ln2 = nn.LayerNorm(d_model)
         self.mlp = MLP(d_model, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
@@ -123,6 +137,7 @@ class GenConfig:
     dropout: float = 0.1
     use_segment_embed: bool = True
     quantiles: Optional[List[float]] = None  # e.g., [0.1, 0.5, 0.9]
+    attn_backend: str = "sdpa"  # 'sdpa' or 'math'
 
 
 class Generator(nn.Module):
@@ -133,7 +148,7 @@ class Generator(nn.Module):
         self.pos = SinusoidalPositionalEncoding(cfg.d_model)
         self.seg = nn.Embedding(2, cfg.d_model) if cfg.use_segment_embed else None
         self.blocks = nn.ModuleList([
-            TransformerBlock(cfg.d_model, cfg.n_heads, cfg.dropout, cfg.d_z, causal=True)
+            TransformerBlock(cfg.d_model, cfg.n_heads, cfg.dropout, cfg.d_z, causal=True, attn_backend=cfg.attn_backend)
             for _ in range(cfg.n_layers)
         ])
         out_dim = cfg.K if not cfg.quantiles else cfg.K * len(cfg.quantiles)
@@ -192,6 +207,7 @@ class DiscConfig:
     dropout: float = 0.1
     use_segment_embed: bool = True
     spectral_norm: bool = False
+    attn_backend: str = "sdpa"
 
 
 class Discriminator(nn.Module):
@@ -202,7 +218,7 @@ class Discriminator(nn.Module):
         self.pos = SinusoidalPositionalEncoding(cfg.d_model)
         self.seg = nn.Embedding(2, cfg.d_model) if cfg.use_segment_embed else None
         self.blocks = nn.ModuleList([
-            TransformerBlock(cfg.d_model, cfg.n_heads, cfg.dropout, d_z=None, causal=False, spectral_norm=cfg.spectral_norm)
+            TransformerBlock(cfg.d_model, cfg.n_heads, cfg.dropout, d_z=None, causal=False, spectral_norm=cfg.spectral_norm, attn_backend=cfg.attn_backend)
             for _ in range(cfg.n_layers)
         ])
         self.head = nn.Linear(cfg.d_model, 1)

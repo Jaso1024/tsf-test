@@ -63,6 +63,7 @@ def parse_args():
     p.add_argument('--clip_grad', type=float, default=1.0)
     p.add_argument('--amp', choices=['bf16', 'fp16', 'off'], default='bf16')
     p.add_argument('--flash', type=bool, default=True)
+    p.add_argument('--attn_backend', choices=['sdpa','math'], default='sdpa', help='Attention backend. Use math if SDPA kernels misbehave.')
     # Runtime
     p.add_argument('--device', default='cuda')
     p.add_argument('--log_every', type=int, default=200)
@@ -132,9 +133,9 @@ def main():
     use_quantiles = args.loss == 'quantile'
     gen_cfg = GenConfig(K=K_model, d_model=args.d_model, n_layers=args.n_layers, n_heads=args.n_heads,
                         d_z=args.d_z, dropout=args.dropout, use_segment_embed=True,
-                        quantiles=(args.quantiles if use_quantiles else None))
+                        quantiles=(args.quantiles if use_quantiles else None), attn_backend=args.attn_backend)
     disc_cfg = DiscConfig(K=K_model, d_model=args.d_model, n_layers=args.n_layers, n_heads=args.n_heads,
-                          dropout=args.dropout, use_segment_embed=True, spectral_norm=args.spectral_norm_D)
+                          dropout=args.dropout, use_segment_embed=True, spectral_norm=args.spectral_norm_D, attn_backend=args.attn_backend)
     G = Generator(gen_cfg).to(device)
     D = Discriminator(disc_cfg).to(device)
     print(f"G params: {count_parameters(G):,} | D params: {count_parameters(D):,}")
@@ -150,7 +151,7 @@ def main():
     step = 0
     best_mae = float('inf')
 
-    with FlashSDPA(args.flash):
+    with FlashSDPA(args.flash and args.attn_backend=='sdpa'):
         pbar = tqdm(total=args.iters, dynamic_ncols=True)
         while step < args.iters:
             for batch in loader:
